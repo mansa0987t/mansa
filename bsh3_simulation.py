@@ -1,3 +1,4 @@
+import argparse
 import os
 import json
 import math
@@ -22,6 +23,33 @@ ARTIFACT_DIR = "./artifacts"
 def ensure_artifacts_dir():
     if not os.path.exists(ARTIFACT_DIR):
         os.makedirs(ARTIFACT_DIR, exist_ok=True)
+
+
+def render_equity_curve(equity_curve, show_plot=False, save_plot=True):
+    ensure_artifacts_dir()
+    plt.figure(figsize=(10, 5))
+    plt.plot(equity_curve.index, equity_curve.values)
+    plt.title('Equity Curve')
+    plt.xlabel('Date')
+    plt.ylabel('Portfolio Value')
+    plt.grid(True)
+    plt.tight_layout()
+    plot_path = None
+    if save_plot:
+        plot_path = os.path.join(ARTIFACT_DIR, 'equity_curve.png')
+        plt.savefig(plot_path)
+    if show_plot:
+        plt.show()
+    else:
+        plt.close()
+    return plot_path
+
+
+def write_summary_artifact(payload):
+    ensure_artifacts_dir()
+    with open(os.path.join(ARTIFACT_DIR, 'summary.txt'), 'w') as f:
+        json.dump(payload, f, indent=2)
+        f.write('\n')
 
 
 def generate_calendar(start_date: str, end_date: str) -> pd.DatetimeIndex:
@@ -315,63 +343,67 @@ def backtest(data, scores, weights, portfolio_returns, turnover):
     return metrics, equity_curve
 
 
-def make_report(data, scores, weights, metrics, equity_curve):
-    print("Generating reports...")
-    ensure_artifacts_dir()
-
+def summarize_latest_state(scores, weights):
     latest_date = scores['date'].max()
     latest_scores = scores[scores['date'] == latest_date].copy()
     latest_weights = weights.loc[latest_date]
     latest_scores['weight'] = latest_scores['ticker'].map(latest_weights)
     latest_scores = latest_scores.sort_values('score', ascending=False)
+    current_regime = latest_scores['regime'].iloc[0]
+    top5 = latest_scores.head(5)['ticker'].tolist()
+    return latest_date, latest_scores, current_regime, top5
+
+
+def make_report(
+    data,
+    scores,
+    weights,
+    metrics,
+    equity_curve,
+    plot_path=None,
+    export_pdf=True,
+):
+    print("Generating reports...")
+    ensure_artifacts_dir()
+
+    latest_date, latest_scores, current_regime, top5 = summarize_latest_state(scores, weights)
     latest_scores.to_csv(os.path.join(ARTIFACT_DIR, 'bsh3_scores.csv'), index=False)
 
-    with open(os.path.join(ARTIFACT_DIR, 'summary.txt'), 'w') as f:
-        json.dump(metrics, f, indent=2)
-
-    plt.figure(figsize=(10, 5))
-    plt.plot(equity_curve.index, equity_curve.values)
-    plt.title('Equity Curve')
-    plt.xlabel('Date')
-    plt.ylabel('Portfolio Value')
-    plt.grid(True)
-    plot_path = os.path.join(ARTIFACT_DIR, 'equity_curve.png')
-    plt.tight_layout()
-    plt.savefig(plot_path)
-    plt.close()
-
-    pdf_path = os.path.join(ARTIFACT_DIR, 'bsh3_report.pdf')
-    c = canvas.Canvas(pdf_path, pagesize=letter)
-    width, height = letter
-    c.setFont("Helvetica-Bold", 16)
-    c.drawString(50, height - 50, "BSH 3.0 Auto-Scorer Report")
-
-    c.setFont("Helvetica", 12)
-    current_regime = scores[scores['date'] == latest_date]['regime'].iloc[0]
     regime_map = {0: 'bull', 1: 'neutral', 2: 'bear'}
-    c.drawString(50, height - 80, f"Current Regime: {regime_map.get(current_regime, 'unknown')}")
+    top5_df = latest_scores.head(5)
 
-    c.drawString(50, height - 110, "Top 5 Tickers:")
-    top5 = latest_scores.head(5)
-    y = height - 130
-    for _, row in top5.iterrows():
-        c.drawString(60, y, f"{row['ticker']}: Score {row['score']:.1f}, Weight {row['weight']:.3f}")
-        y -= 15
+    if export_pdf:
+        if not plot_path:
+            plot_path = render_equity_curve(equity_curve, show_plot=False, save_plot=True)
+        pdf_path = os.path.join(ARTIFACT_DIR, 'bsh3_report.pdf')
+        c = canvas.Canvas(pdf_path, pagesize=letter)
+        width, height = letter
+        c.setFont("Helvetica-Bold", 16)
+        c.drawString(50, height - 50, "BSH 3.0 Auto-Scorer Report")
 
-    c.drawString(50, y - 10, f"Sharpe: {metrics['sharpe']:.2f}")
-    c.drawString(200, y - 10, f"Max Drawdown: {metrics['max_drawdown']:.2%}")
-    c.drawString(50, y - 30, f"Annualized Return: {metrics['annualized_return']:.2%}")
-    c.drawString(200, y - 30, f"Turnover: {metrics['turnover']:.2f}")
+        c.setFont("Helvetica", 12)
+        c.drawString(50, height - 80, f"Current Regime: {regime_map.get(current_regime, 'unknown')}")
 
-    # Embed plot image
-    c.drawImage(plot_path, 50, 100, width=500, height=250)
-    c.showPage()
-    c.save()
+        c.drawString(50, height - 110, "Top 5 Tickers:")
+        y = height - 130
+        for _, row in top5_df.iterrows():
+            c.drawString(60, y, f"{row['ticker']}: Score {row['score']:.1f}, Weight {row['weight']:.3f}")
+            y -= 15
 
-    return latest_scores, regime_map.get(current_regime, 'unknown'), top5['ticker'].tolist()
+        c.drawString(50, y - 10, f"Sharpe: {metrics['sharpe']:.2f}")
+        c.drawString(200, y - 10, f"Max Drawdown: {metrics['max_drawdown']:.2%}")
+        c.drawString(50, y - 30, f"Annualized Return: {metrics['annualized_return']:.2%}")
+        c.drawString(200, y - 30, f"Turnover: {metrics['turnover']:.2f}")
+
+        if plot_path and os.path.exists(plot_path):
+            c.drawImage(plot_path, 50, 100, width=500, height=250)
+        c.showPage()
+        c.save()
+
+    return latest_scores, regime_map.get(current_regime, 'unknown'), top5
 
 
-def main():
+def run_pipeline(show_plot=True, save_plot=True, export_pdf=True, quiet=False):
     ensure_artifacts_dir()
     data = generate_data()
     factors = compute_factors(data)
@@ -379,25 +411,158 @@ def main():
     scores = score_tickers(data, factors, prob_df, regime_series)
     weights, portfolio_returns, turnover = allocate(data, scores)
     metrics, equity_curve = backtest(data, scores, weights, portfolio_returns, turnover)
-    latest_scores, final_regime, top5 = make_report(data, scores, weights, metrics, equity_curve)
+
+    combined_plot = save_plot or export_pdf or show_plot
+    plot_path = None
+    if combined_plot:
+        plot_path = render_equity_curve(
+            equity_curve,
+            show_plot=show_plot,
+            save_plot=save_plot or export_pdf,
+        )
+
+    latest_scores, final_regime, top5 = make_report(
+        data,
+        scores,
+        weights,
+        metrics,
+        equity_curve,
+        plot_path=plot_path,
+        export_pdf=export_pdf,
+    )
 
     summary = {
         'final_regime': final_regime,
         'annualized_return': round(metrics['annualized_return'], 4),
         'sharpe': round(metrics['sharpe'], 2),
         'max_drawdown': round(metrics['max_drawdown'], 4),
-        'top5': top5
+        'top5': top5,
     }
-    print(summary)
+    summary_payload = dict(metrics)
+    summary_payload.update(summary)
+    write_summary_artifact(summary_payload)
+    if not quiet:
+        print(summary)
 
-    plt.figure(figsize=(10, 5))
-    plt.plot(equity_curve.index, equity_curve.values)
-    plt.title('Equity Curve')
-    plt.xlabel('Date')
-    plt.ylabel('Portfolio Value')
-    plt.grid(True)
-    plt.tight_layout()
-    plt.show()
+    return {
+        'summary': summary,
+        'metrics': metrics,
+        'scores': latest_scores,
+        'weights': weights,
+        'equity_curve': equity_curve,
+        'plot_path': plot_path,
+    }
+
+
+def load_latest_summary():
+    summary_path = os.path.join(ARTIFACT_DIR, 'summary.txt')
+    if os.path.exists(summary_path):
+        with open(summary_path, 'r') as f:
+            try:
+                return json.load(f)
+            except json.JSONDecodeError:
+                print("Warning: summary.txt is not valid JSON.")
+    return None
+
+
+def load_latest_scores():
+    scores_path = os.path.join(ARTIFACT_DIR, 'bsh3_scores.csv')
+    if os.path.exists(scores_path):
+        try:
+            return pd.read_csv(scores_path)
+        except Exception as exc:  # pylint: disable=broad-except
+            print(f"Warning: unable to read scores CSV ({exc}).")
+    return None
+
+
+def inspect_artifacts(top=5, show_weights=False):
+    ensure_artifacts_dir()
+    summary = load_latest_summary()
+    if summary:
+        print("Latest summary metrics:")
+        print(json.dumps(summary, indent=2))
+    else:
+        print("No summary metrics found. Run the pipeline first.")
+
+    scores = load_latest_scores()
+    if scores is not None and not scores.empty:
+        display_cols = ['ticker', 'score']
+        if show_weights and 'weight' in scores.columns:
+            display_cols.append('weight')
+        print(f"Top {top} scores from latest run:")
+        print(scores[display_cols].head(top).to_string(index=False))
+    else:
+        print("No score artifacts found. Run the pipeline to generate them.")
+
+
+def build_arg_parser():
+    parser = argparse.ArgumentParser(
+        description="Regime-aware BSH 3.0 Auto-Scorer simulation platform",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    subparsers = parser.add_subparsers(dest='command')
+
+    run_parser = subparsers.add_parser('run', help="Execute the full pipeline")
+    run_parser.add_argument(
+        '--no-show-plot',
+        action='store_true',
+        help="Skip displaying the equity curve plot interactively.",
+    )
+    run_parser.add_argument(
+        '--no-save-plot',
+        action='store_true',
+        help="Do not save the equity curve PNG artifact.",
+    )
+    run_parser.add_argument(
+        '--no-pdf',
+        action='store_true',
+        help="Skip generating the PDF report (other artifacts still save).",
+    )
+    run_parser.add_argument(
+        '--quiet',
+        action='store_true',
+        help="Suppress the final JSON-style summary printout.",
+    )
+
+    inspect_parser = subparsers.add_parser(
+        'inspect',
+        help="Inspect the most recent artifacts without re-running the simulation",
+    )
+    inspect_parser.add_argument('--top', type=int, default=5, help="Number of top tickers to display.")
+    inspect_parser.add_argument(
+        '--show-weights',
+        action='store_true',
+        help="Display portfolio weights alongside scores when available.",
+    )
+
+    parser.set_defaults(
+        command='run',
+        no_show_plot=False,
+        no_save_plot=False,
+        no_pdf=False,
+        quiet=False,
+    )
+    return parser
+
+
+def main(argv=None):
+    parser = build_arg_parser()
+    args = parser.parse_args(argv)
+
+    if args.command == 'inspect':
+        inspect_artifacts(top=args.top, show_weights=args.show_weights)
+        return
+
+    if args.command == 'run':
+        run_pipeline(
+            show_plot=not args.no_show_plot,
+            save_plot=not args.no_save_plot,
+            export_pdf=not args.no_pdf,
+            quiet=args.quiet,
+        )
+        return
+
+    parser.print_help()
 
 
 if __name__ == '__main__':
